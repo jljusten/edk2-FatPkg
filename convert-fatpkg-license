@@ -1,0 +1,375 @@
+#!/usr/bin/env python3
+#
+# Copyright (c) 2016, Intel Corporation. All rights reserved.
+#
+# This program and the accompanying materials are licensed and made available
+# under the terms and conditions of the BSD License which accompanies this
+# distribution. The full text of the license may be found at
+# http://opensource.org/licenses/bsd-license.php
+#
+# THE PROGRAM IS DISTRIBUTED UNDER THE BSD LICENSE ON AN "AS IS" BASIS, WITHOUT
+# WARRANTIES OR REPRESENTATIONS OF ANY KIND, EITHER EXPRESS OR IMPLIED.
+#
+
+import os
+import re
+import subprocess
+import sys
+
+bsd_3 = r'''
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+
+(?:1?\.|\*)? Redistributions of source code must retain the above copyright notice, this
+list of conditions and the following disclaimer.
+
+(?:2?\.|\*)? Redistributions in binary form must reproduce the above copyright notice,
+this list of conditions and the following disclaimer in the documentation
+and/or other materials provided with the distribution.
+
+(?:3?\.|\*)? Neither the name of (?:the copyright holder|intel(?: corp\S*)?)
+nor the names of its contributors
+may be used to endorse or promote products derived from this software without
+specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT (?:HOLDER|owner) OR CONTRIBUTORS BE LIABLE
+FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+DAMAGES \(INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION\) HOWEVER
+CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+OR TORT \(INCLUDING NEGLIGENCE OR OTHERWISE\) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+'''
+
+xbsd_3 = r'''
+ Redistribution
+ 
+
+'''
+
+fat_l = bsd_3 + r'''
+Additional terms: In addition to the forgoing, redistribution and use
+of the code is conditioned upon the FAT 32 File System Driver and all
+derivative works thereof being used for and designed only to read
+and/or write to a file system that is directly managed by an
+Extensible Firmware Interface \(EFI\) implementation or by an emulator
+of an EFI implementation.
+'''
+
+fat_l_2 = bsd_3 + r'''
+Additional terms: In addition to the forgoing, redistribution and use
+of the code is conditioned upon the FAT 32 File System Driver and all
+derivative works thereof being used for and designed only to read
+and/or write to a file system that is directly managed by Intel's 
+Extensible Firmware Initiative \(EFI\) Specification v. 1.0 and later 
+and/or the Unified Extensible Firmware Interface \(UEFI\) Forum's UEFI 
+Specifications v.2.0 and later \(together the "UEFI Specifications"\); 
+only as necessary to emulate an implementation of the UEFI Specifications; 
+and to create firmware, applications, utilities and/or drivers.
+'''
+
+punt_l = r'''
+This program and the accompanying materials
+are licensed and made available under the terms and conditions of the Software
+License Agreement which accompanies this distribution.
+'''
+
+ws_re = re.compile(r'\s+', re.MULTILINE)
+
+trailing_ws_re = re.compile(r'(?<=\S)[ \t]+$', re.MULTILINE)
+
+def make_re(src):
+    regex = ws_re.sub(r'\s+(?:(?:[#;]|//)\s*)*', src.strip())
+    regex = r'(?P<comment>(?:(?:[#;]|//)\s+)?)' + regex
+    regex = re.compile(regex, re.MULTILINE|re.IGNORECASE)
+    return regex
+
+fat_re = make_re(fat_l)
+fat_re2 = make_re(fat_l_2)
+bsd_3_re = make_re(bsd_3)
+punt_re = make_re(punt_l)
+
+edk2_lic = r'''
+# This program and the accompanying materials are licensed and made available
+# under the terms and conditions of the BSD License which accompanies this
+# distribution. The full text of the license may be found at
+# http://opensource.org/licenses/bsd-license.php
+# 
+# THE PROGRAM IS DISTRIBUTED UNDER THE BSD LICENSE ON AN "AS IS" BASIS,
+# WITHOUT WARRANTIES OR REPRESENTATIONS OF ANY KIND, EITHER EXPRESS OR IMPLIED.
+'''.strip()
+
+class FixTree:
+
+    def __init__(self, fatdir):
+
+        for (base, dirs, files) in os.walk(fatdir):
+            for i in range(len(dirs) - 1, -1, -1):
+                if dirs[i] in ('.git', '.svn'):
+                    dirs.pop(i)
+            for filename in files:
+                self.process_file(os.path.join(base, filename))
+
+    def process_file(self, filename):
+        #if not filename.endswith('.fdf'):
+        #    return
+        d = None
+        for encoding in ('utf-16', 'utf-8', 'cp1252'):
+            try:
+                f = open(filename, 'r', encoding=encoding)
+                d = str(f.read())
+                f.close()
+            except UnicodeError as e:
+                #print(filename, encoding, e)
+                continue
+            break
+        assert(d is not None)
+    
+        for lic_re in (fat_re, fat_re2, punt_re):
+            mo = lic_re.search(d)
+            if mo is not None:
+                break
+    
+        if 0:
+            if mo is not None:
+                print('License in', filename)
+            else:
+                print('License not in', filename)
+        else:
+            if mo is None:
+                return
+    
+        #assert(mo is not None)
+    
+        comment = None
+        for c in ((('.c','.h', '.uni'), '// '),
+                  (('.dsc', '.dec', '.fdf', '.inf'), '# '),
+                  (('.txt',), ''),
+                  (('.nspd', '.msa'), '<License>'),):
+            if filename.endswith(c[0]):
+                comment = c[1]
+                break
+        if comment is None:
+            print(filename)
+        assert(comment is not None)
+        comment = mo.group('comment')
+    
+        commented_lic = edk2_lic
+        if comment != '# ':
+            commented_lic = commented_lic.replace('# ', comment)
+    
+        commented_lic = trailing_ws_re.sub(r'', commented_lic)
+    
+        result = d[:mo.start()] + commented_lic + d[mo.end():]
+    
+        if 1:
+            f = open(filename, 'w', encoding='utf-8', newline='\r\n')
+            f.write(result)
+            f.close()
+        else:
+            print(filename)
+            print(result)
+    
+class GitRunner:
+
+    def __init__(self, *args, stdin=None, fail_ok=False):
+        cmd = [ 'git' ]
+        cmd += args
+        if stdin:
+            subp_stdin = subprocess.PIPE
+        else:
+            subp_stdin = None
+            
+        p = subprocess.Popen(cmd,
+                             stdin=subp_stdin,
+                             stdout=subprocess.PIPE,
+                             stderr=subprocess.STDOUT)
+        self.stdout = p.communicate(input=stdin)[0].decode('utf-8', 'ignore')
+        self.returncode = p.returncode
+        if not fail_ok and p.returncode != 0:
+            print('git failed:\n', self.stdout)
+            assert(p.returncode == 0)
+        self.ok = True
+
+class Git(GitRunner):
+
+    def __init__(self, cmd, stdin=None, fail_ok=False):
+        if type(cmd) == str:
+            cmd = cmd.split()
+        GitRunner.__init__(self, *cmd, stdin=stdin, fail_ok=fail_ok)
+
+def git(cmd, fail_ok=False, stdin=None, stdout=False):
+    g = Git(cmd, stdin=stdin, fail_ok=fail_ok)
+    if stdout:
+        return g.stdout
+    else:
+        return g.returncode
+
+class XGitCommit:
+
+    def __init__(self, base, src, dst):
+        self.run_git('add', dst)
+        self.run_git('rm', src)
+        f = tempfile.NamedTemporaryFile(delete=False)
+        f.write(('{0}: Convert to markdown with mediawiki-to-md ' +
+                 'script').format(base).encode('utf-8'))
+        f.close()
+        self.run_git('commit', '-sF', f.name)
+        self.ok = True
+
+    def run_git(self, *args):
+        cmd = [ 'git' ]
+        cmd += args
+        p = subprocess.Popen(cmd,
+                             stdout=subprocess.PIPE,
+                             stderr=subprocess.STDOUT)
+        result = p.communicate()[0].decode('utf-8', 'ignore')
+        if p.returncode != 0:
+            print('git failed:\n', result)
+            assert(p.returncode == 0)
+        return result
+
+me = '''
+AJFISH@FatPkg     Andrew Fish <afish@apple.com>
+gikidy@FatPkg     Kun Gui <kun.gui@intel.com>
+hhtian@FatPkg     Hot Tian <hot.tian@intel.com>
+jljusten@FatPkg   Jordan Justen <jordan.l.justen@intel.com>
+klu2@FatPkg       Ken Lu <ken.lu@intel.com>
+laurie0131@FatPkg Laurie Jarlstrom <laurie.jarlstrom@intel.com>
+mdkinney@FatPkg   Michael D Kinney <michael.d.kinney@intel.com>
+niruiyu@FatPkg    Ruiyu Ni <ruiyu.ni@intel.com>
+qhuang8@FatPkg    Qing Huang <qing.huang@intel.com>
+xli24@FatPkg      Leon Li <leon.li@intel.com>
+
+erictian          Feng Tian <feng.tian@intel.com>
+lzeng14           Star Zeng <star.zeng@intel.com>
+
+shumin.qiu@intel.com  Shumin Qiu <shumin.qiu@intel.com>
+liming.gao@intel.com  Liming Gao <liming.gao@intel.com>
+'''.strip().split('\n')
+me = map(lambda l: l.strip(), me)
+me = filter(None, me)
+me = map(lambda l: l.split(None, 1), me)
+me = map(lambda e: (e[0], e[1].split('<')), me)
+me = map(lambda e: (e[0], (e[1][0].strip(), '<' + e[1][1].strip())), me)
+mailcap = dict(me)
+
+for e in 'niruiyu erictian jljusten niruiyu jljusten lzeng14'.split():
+    ef = e + '@FatPkg'
+    if ef in mailcap:
+        mailcap[e] = mailcap[ef]
+
+old_mailcap = {
+    'qhuang8@FatPkg': ('Qing Huang', '<qing.huang@intel.com>'),
+    'mdkinney@FatPkg': ('Michael D Kinney', '<michael.d.kinney@intel.com>'),
+    'xli24@FatPkg': ('Leon Li', '<leon.li@intel.com>'),
+    'gikidy@FatPkg': ('Kun Gui', '<kun.gui@intel.com>'),
+    'jljusten@FatPkg': ('Jordan Justen', '<jordan.l.justen@intel.com>'),
+    }
+
+def fix_name(name):
+    if name[1] in mailcap:
+        return mailcap[name[1]]
+    else:
+        return name
+
+class App:
+
+    def __init__(self):
+        self.dir = os.getcwd()
+        assert(os.path.isdir(os.path.join(self.dir, '.git')))
+        assert(git('ls-tree origin/master',
+                   stdout=True).find('EnhancedFatDxe') >= 0)
+        revs = git('rev-list --abbrev-commit --reverse ' +
+                   'origin/master', stdout=True).split()
+        git('reset --hard')
+        git('clean -xdf')
+        git('checkout {0}'.format(revs[0]))
+        git('branch -D open-source', fail_ok=True)
+        git('checkout -b open-source')
+        git(('commit', '--amend', '--reset-author',
+             '--allow-empty', '-m', 'Empty FatPkg Tree'))
+
+        for rev in revs[1:]:
+            self.add_commit(rev)
+        #self.add_commit(revs[2])
+        #self.add_commit(revs[3])
+
+        revs = git('rev-list --abbrev-commit --reverse ' +
+                   'open-source', stdout=True).split()
+        git('reset --hard {0}'.format(revs[0]))
+        self.final_squash_2_to_1(revs[1:3])
+        self.final_commit_message()
+        #git('cherry-pick {0}'.format(revs[1]))
+        #git('cherry-pick {0}'.format(revs[2]))
+        #git('reset --soft HEAD~')
+        #git('commit -C HEAD --amend')
+        #print(len(revs), revs[-1])
+        for i in range(3, len(revs)-2, 3):
+            self.final_squash_3_to_1(revs[i:i+3])
+            self.final_commit_message()
+
+    gitsvn_re = re.compile('''
+                             ^
+                             git-svn-id: \s+
+                             (?P<url> \S+ ) \s+
+                             [^\n]+ \n
+                             $
+                           ''',
+                           re.VERBOSE | re.MULTILINE)
+
+    def final_commit_message(self):
+        log = git('log --pretty=%B -1', stdout=True).strip()
+        log = log.split('\n')
+        log = filter(lambda l: not l.startswith('git-svn-id:'), log)
+        log = map(lambda l: l.replace('cherry picked from',
+                                      'based on FatPkg', 1), log)
+        log = '\n'.join(log)
+        log = log.encode('utf-8')
+        git('commit --amend --allow-empty -F -', stdin=log)
+
+    def final_squash_2_to_1(self, revs):
+        git('cherry-pick {0}'.format(revs[0]))
+        git('cherry-pick {0}'.format(revs[1]))
+        git('reset --soft HEAD~')
+        git('commit -C HEAD --amend --allow-empty')
+
+    def final_squash_3_to_1(self, revs):
+        self.final_squash_2_to_1(revs[0:2])
+        #git('cherry-pick {0}'.format(revs[0]))
+        #git('cherry-pick {0}'.format(revs[1]))
+        #git('reset --soft HEAD~')
+        #git('commit -C {0} --amend --allow-empty'.format(revs[1]))
+        git('cherry-pick {0}'.format(revs[2]))
+        git('reset --soft HEAD~')
+        git('commit -C {0} --amend --allow-empty'.format(revs[1]))
+
+    def add_commit(self, rev):
+        ac = git(('log', '--pretty=%an%n%ae%n%cn%n%ce', '-1', rev),
+                 stdout=True)
+        ac = ac.split('\n')[:4]
+        author = ac[:2]
+        committer = ac[2:]
+        #print(author, committer)
+        git('cherry-pick -x {0}'.format(rev))
+        assert(os.path.exists(os.path.join(self.dir, 'EnhancedFatDxe')))
+
+        author = fix_name(author)
+        committer = fix_name(committer)
+        git((#'-c', 'user.name=' + committer[0],
+             #'-c', 'user.email=' + committer[1],
+             'commit', '-C', 'HEAD', '--amend',
+             '--author={0} <{1}>'.format(*author)))
+        self.returncode = 0
+
+        FixTree(self.dir)
+        git('add -u')
+        git(('commit', '-m', 'Fix license in {0} temp commit'.format(rev)))
+
+        git('revert HEAD --no-edit')
+
+if __name__ == "__main__":
+    sys.exit(App().returncode)
